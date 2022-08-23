@@ -8,16 +8,23 @@ def my_formatwarning(msg, *args, **kwargs):
     return str(msg) + '\n'
 warnings.formatwarning = my_formatwarning
 
+
+import xarray as xr  # module-level import so all functions can get to it.
+
+import multiprocessing as mp
+
+
 ##############
 #Main function
 ##############
 
-def averaging_example(adf, clobber=False, search=None):
+def create_climo_files(adf, clobber=False, search=None):
     """
     This is an example function showing
     how to set-up a time-averaging method
     for calculating climatologies from
-    CAM time series files.
+    CAM time series files using
+    multiprocessing for parallelization.
 
     Description of needed inputs from ADF:
 
@@ -39,12 +46,14 @@ def averaging_example(adf, clobber=False, search=None):
     """
 
     #Import necessary modules:
-    import xarray as xr
     from pathlib import Path
     from adf_base import AdfError
 
     #Notify user that script has started:
-    print("  Calculating CAM climatologies...")
+    print("\n  Calculating CAM climatologies...")
+
+    # Set up multiprocessing pool to parallelize writing climo files.
+    number_of_cpu = adf.num_procs  # Get number of available processors from the ADF
 
     #Extract needed quantities from ADF object:
     #-----------------------------------------
@@ -92,6 +101,12 @@ def averaging_example(adf, clobber=False, search=None):
         end_year.append(bl_eyr)
     #-----------------------------------------
 
+    # Check whether averaging interval is supplied
+    # -> using only years takes from the beginning of first year to end of second year.
+    # -> slice('1991','1998') will get all of [1991,1998].
+    # -> slice(None,None) will use all times.
+
+
     #Loop over CAM cases:
     for case_idx, case_name in enumerate(case_names):
 
@@ -117,23 +132,27 @@ def averaging_example(adf, clobber=False, search=None):
 
         #Check if climo directory exists, and if not, then create it:
         if not output_location.is_dir():
-            print(f"    {output_location} not found, making new directory")
+            print(f"\t    {output_location} not found, making new directory")
             output_location.mkdir(parents=True)
 
         #Time series file search
         if search is None:
             search = "{CASE}*.{VARIABLE}.*nc"  # NOTE: maybe we should not care about the file extension part at all, but check file type later?
 
+        syr, eyr = check_averaging_interval(start_year[case_idx], end_year[case_idx])
+
         #Loop over CAM output variables:
+        list_of_arguments = []
         for var in var_list:
+
             # Create name of climatology output file (which includes the full path)
             # and check whether it is there (don't do computation if we don't want to overwrite):
             output_file = output_location / f"{case_name}_{var}_climo.nc"
             if (not clobber) and (output_file.is_file()):
-                print(f"INFO: Found climo file and clobber is False, so skipping {var} and moving to next variable.")
+                print(f"\t    INFO: Found climo file and clobber is False, so skipping {var} and moving to next variable.")
                 continue
             elif (clobber) and (output_file.is_file()):
-                print(f"INFO: Climo file exists for {var}, but clobber is {clobber}, so will OVERWRITE it.")
+                print(f"\t    INFO: Climo file exists for {var}, but clobber is {clobber}, so will OVERWRITE it.")
 
             #Create list of time series files present for variable:
             ts_filenames = search.format(CASE=case_name, VARIABLE=var)
@@ -147,108 +166,95 @@ def averaging_example(adf, clobber=False, search=None):
                 warnings.warn(errmsg)
                 continue
 
-            #Read in files via xarray (xr):
-            if len(ts_files) == 1:
-                cam_ts_data = xr.open_dataset(ts_files[0], decode_times=True)
-            else:
-                cam_ts_data = xr.open_mfdataset(ts_files, decode_times=True, combine='by_coords')
-
-            #Average time dimension over time bounds, if bounds exist:
-            if 'time_bnds' in cam_ts_data:
-                time = cam_ts_data['time']
-                # NOTE: force `load` here b/c if dask & time is cftime, throws a NotImplementedError:
-                time = xr.DataArray(cam_ts_data['time_bnds'].load().mean(dim='nbnd').values, dims=time.dims, attrs=time.attrs)
-                cam_ts_data['time'] = time
-                cam_ts_data.assign_coords(time=time)
-                cam_ts_data = xr.decode_cf(cam_ts_data)
-
-            # Check whether averaging interval is supplied
-            # -> using only years takes from the beginning of first year to end of second year.
-            # -> slice('1991','1998') will get all of [1991,1998].
-            # -> slice(None,None) will use all times.
-
-            #For now, make sure year inputs are integers or None,
-            #in order to allow for the zero additions done below:
-            if start_year[case_idx]:
-                check_syr = int(start_year[case_idx])
-            else:
-                check_syr = None
-            #end if
-
-            if end_year[case_idx]:
-                check_eyr = int(end_year[case_idx])
-            else:
-                check_eyr = None
-
-            #Need to add zeros if year values aren't long enough:
-            #------------------
-            #start year:
-            if check_syr:
-                if check_syr < 1000:
-                    if check_syr >= 100:
-                        syr = f"0{check_syr}"
-                    elif check_syr >= 10:
-                        syr = f"00{check_syr}"
-                    elif check_syr >= 1:
-                        syr = f"000{check_syr}"
-                    else:
-                        errmsg = " 'start_year' values must be positive whole numbers"
-                        errmsg += f"not '{start_year[case_idx]}'."
-                        raise AdfError(errmsg)
-                    #End if
-                else:
-                    #Use year value as-is:
-                    syr = f"{check_syr}"
-                #End if
-            else:
-                syr = None
-            #End if
-
-            #end year:
-            if check_eyr:
-                if check_eyr < 1000:
-                    if check_eyr >= 100:
-                        eyr = f"0{check_eyr}"
-                    elif check_eyr >= 10:
-                        eyr = f"00{check_eyr}"
-                    elif check_eyr >= 1:
-                        eyr = f"000{check_eyr}"
-                    else:
-                        errmsg = " 'end_year' values must be positive whole numbers"
-                        errmsg += f"not '{end_year[case_idx]}'."
-                        raise AdfError(errmsg)
-                    #End if
-                else:
-                    #Use year value as-is:
-                    eyr = f"{check_eyr}"
-                #End if
-            else:
-                eyr = None
-            #End if
-            #------------------
-
-            #Extract data subset using provided year bounds:
-            cam_ts_data = cam_ts_data.sel(time=slice(syr, eyr))
-
-            #Group time series values by month, and average those months together:
-            cam_climo_data = cam_ts_data.groupby('time.month').mean(dim='time')
-
-            #Rename "months" to "time":
-            cam_climo_data = cam_climo_data.rename({'month':'time'})
-
-            #Set netCDF encoding method (deal with getting non-nan fill values):
-            enc_dv = {xname: {'_FillValue': None, 'zlib': True, 'complevel': 4} for xname in cam_climo_data.data_vars}
-            enc_c  = {xname: {'_FillValue': None} for xname in cam_climo_data.coords}
-            enc    = {**enc_c, **enc_dv}
-
-            #Output variable climatology to NetCDF-4 file:
-            cam_climo_data.to_netcdf(output_file, format='NETCDF4', encoding=enc)
-
+            list_of_arguments.append((ts_files, syr, eyr, output_file))
         #End of var_list loop
         #--------------------
+
+        # Parallelize the computation using multiprocessing pool:
+        with mp.Pool(processes=number_of_cpu) as p:
+            result = p.starmap(process_variable, list_of_arguments)
 
     #End of model case loop
     #----------------------
 
     #Notify user that script has ended:
     print("  ...CAM climatologies have been calculated successfully.")
+
+
+#
+# Local functions
+#
+def process_variable(ts_files, syr, eyr, output_file):
+    '''
+    Compute and save the climatology file.
+    '''
+    #Read in files via xarray (xr):
+    if len(ts_files) == 1:
+        cam_ts_data = xr.open_dataset(ts_files[0], decode_times=True)
+    else:
+        cam_ts_data = xr.open_mfdataset(ts_files, decode_times=True, combine='by_coords')
+    #Average time dimension over time bounds, if bounds exist:
+    if 'time_bnds' in cam_ts_data:
+        time = cam_ts_data['time']
+        # NOTE: force `load` here b/c if dask & time is cftime, throws a NotImplementedError:
+        time = xr.DataArray(cam_ts_data['time_bnds'].load().mean(dim='nbnd').values, dims=time.dims, attrs=time.attrs)
+        cam_ts_data['time'] = time
+        cam_ts_data.assign_coords(time=time)
+        cam_ts_data = xr.decode_cf(cam_ts_data)
+    #Extract data subset using provided year bounds:
+    cam_ts_data = cam_ts_data.sel(time=slice(syr, eyr))
+    #Group time series values by month, and average those months together:
+    cam_climo_data = cam_ts_data.groupby('time.month').mean(dim='time')
+    #Rename "months" to "time":
+    cam_climo_data = cam_climo_data.rename({'month':'time'})
+    #Set netCDF encoding method (deal with getting non-nan fill values):
+    enc_dv = {xname: {'_FillValue': None, 'zlib': True, 'complevel': 4} for xname in cam_climo_data.data_vars}
+    enc_c  = {xname: {'_FillValue': None} for xname in cam_climo_data.coords}
+    enc    = {**enc_c, **enc_dv}
+    #Output variable climatology to NetCDF-4 file:
+    cam_climo_data.to_netcdf(output_file, format='NETCDF4', encoding=enc)
+    return 1  # All funcs return something. Could do error checking with this if needed.
+
+
+def check_averaging_interval(syear_in, eyear_in):
+    #For now, make sure year inputs are integers or None,
+    #in order to allow for the zero additions done below:
+    if syear_in:
+        check_syr = int(syear_in)
+    else:
+        check_syr = None
+    #end if
+
+    if eyear_in:
+        check_eyr = int(eyear_in)
+    else:
+        check_eyr = None
+
+    #Need to add zeros if year values aren't long enough:
+    #------------------
+    #start year:
+    if check_syr:
+        assert check_syr >= 0, 'Sorry, values must be positive whole numbers.'
+        try:
+            syr = f"{check_syr:04d}"
+        except:
+            errmsg = " 'start_year' values must be positive whole numbers"
+            errmsg += f"not '{syear_in}'."
+            raise AdfError(errmsg)
+    else:
+        syr = None
+    #End if
+
+    #end year:
+    if check_eyr:
+        assert check_eyr >= 0, 'Sorry, end_year values must be positive whole numbers.'
+        try:
+            eyr = f"{check_eyr:04d}"
+        except:
+            errmsg = " 'end_year' values must be positive whole numbers"
+            errmsg += f"not '{eyear_in}'."
+            raise AdfError(errmsg)
+    else:
+        eyr = None
+    #End if
+    return syr, eyr

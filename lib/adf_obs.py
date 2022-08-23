@@ -3,18 +3,16 @@ Observations (obs) class for the Atmospheric
 Diagnostics Framework (ADF).
 This class inherits from the AdfConfig class.
 
-Currently this class does four things:
+Currently this class does three things:
 
-1.  Initializes an instance of AdfConfig.
+1.  Initializes an instance of AdfInfo.
 
 2.  Sets the "variable_defaults" ADF variable.
 
-3.  Determines if this is a model vs obs ADF run
-
-4.  If so, then creates a dictionary of what
-    observational dataset is associated with
-    each requested variable, along with any
-    relevant observational meta-data.
+3.  If a model vs obs run, then creates a
+    dictionary of what observational dataset
+    is associated with each requested variable,
+    along with any relevant observational meta-data.
 
 This class also provide methods for extracting
 the observational data and meta-data for use
@@ -36,19 +34,19 @@ from pathlib import Path
 import yaml
 
 #ADF modules:
-from adf_config import AdfConfig
+from adf_info import AdfInfo
 
 #+++++++++++++++++++
 #Define Obs class
 #+++++++++++++++++++
 
-class AdfObs(AdfConfig):
+class AdfObs(AdfInfo):
 
     """
-    Observations class, which reads in
-    config (YAML) files and provides
-    a mechanism to process and retreive
-    relevant config variables.
+    Observations class, which initializes
+    an AdfInfo object and provides
+    additional variables and methods
+    needed for managing observational data.
     """
 
     def __init__(self, config_file, debug=False):
@@ -63,20 +61,14 @@ class AdfObs(AdfConfig):
         #Determine local directory:
         _adf_lib_dir = Path(__file__).parent
 
-        #Read in "basic_info" config dictionary:
-        _basic_info = self.read_config_var('diag_basic_info', required=True)
-
-        #Expand basic info variable strings:
-        self.expand_references(_basic_info)
-
-        #Determin if variable defaults will be used:
-        self.__use_defaults = self.read_config_var('use_defaults', conf_dict=_basic_info)
+        #Determine if variable defaults will be used:
+        self.__use_defaults = self.get_basic_info('use_defaults')
 
         # Check whether user wants to use defaults:
         #-----------------------------------------
         if self.__use_defaults:
             #Determine whether to use adf defaults or custom:
-            _defaults_file = self.read_config_var('custom_defaults', conf_dict=_basic_info)
+            _defaults_file = self.get_basic_info('defaults_file')
             if _defaults_file is None:
                 _defaults_file = _adf_lib_dir/'adf_variable_defaults.yaml'
 
@@ -86,28 +78,24 @@ class AdfObs(AdfConfig):
         else:
             #Set variable_defaults to empty dictionary:
             self.__variable_defaults = {}
+        #End if
         #-----------------------------------------
-
-        #Initialize ADF variable list:
-        self.__diag_var_list = self.read_config_var('diag_var_list', required=True)
-
-        #Initialize "compare_obs" variable:
-        self.__compare_obs = self.read_config_var('compare_obs', conf_dict=_basic_info)
 
         #Initialize observations dictionary:
         self.__var_obs_dict = {}
 
         #If this is not a model vs obs run, then stop here:
-        if not self.__compare_obs:
+        if not self.compare_obs:
             return
+        #End if
 
         #Extract the "obs_data_loc" default observational data location:
-        obs_data_loc = self.read_config_var("obs_data_loc", conf_dict=_basic_info)
+        obs_data_loc = self.get_basic_info("obs_data_loc")
 
         #Check that a variable defaults file exists (as it is currently needed to extract obs data):
         if not self.__variable_defaults:
             #Determine whether to use adf defaults or custom:
-            _defaults_file = self.read_config_var('custom_defaults', conf_dict=_basic_info)
+            _defaults_file = self.get_basic_info('defaults_file')
             if _defaults_file is None:
                 _defaults_file = _adf_lib_dir/'adf_variable_defaults.yaml'
 
@@ -120,7 +108,7 @@ class AdfObs(AdfConfig):
         #End if
 
         #Loop over variable list:
-        for var in self.__diag_var_list:
+        for var in self.diag_var_list:
 
             #Check if variable is in defaults dictionary:
             if var in _variable_defaults:
@@ -203,45 +191,30 @@ class AdfObs(AdfConfig):
             wmsg += " and check the log for messages.\n"
             wmsg += "!!!!!!!!!!!!!!!\n"
             print(wmsg)
+        #End if
 
     #########
 
     # Create property needed to return "variable_defaults" variable to user:
     @property
     def variable_defaults(self):
-        """Return a copy of the '__variable_defaults' string list to user if requested."""
+        """Return a copy of the '__variable_defaults' dictionary to the user if requested."""
         #Note that a copy is needed in order to avoid having a script mistakenly
-        #modify this variable:
+        #modify this variable, as it is mutable and thus passed by reference:
         return copy.copy(self.__variable_defaults)
 
     # Create property needed to return "use_defaults" variable to user:
     @property
     def use_defaults(self):
-        """Return a copy of the '__use_defaults' logical to user if requested."""
-        #Note that a copy is needed in order to avoid having a script mistakenly
-        #modify this variable:
-        return copy.copy(self.__use_defaults)
+        """Return the '__use_defaults' logical to the user if requested."""
+        return self.__use_defaults
 
-    # Create property needed to return "compare_obs" logical to user:
-    @property
-    def compare_obs(self):
-        """Return the "compare_obs" logical to user if requested."""
-        return copy.copy(self.__compare_obs)
-
-    # Create property needed to return "diag_var_list" list to user:
-    @property
-    def diag_var_list(self):
-        """Return a copy of the "diag_var_list" list to user if requested."""
-        #Note that a copy is needed in order to avoid having a script mistakenly
-        #modify this variable:
-        return copy.copy(self.__diag_var_list)
-
-    #Create property needed to return "var_obs_dict" list to user:
+    # Create property needed to return "var_obs_dict" dictionary to user:
     @property
     def var_obs_dict(self):
-        """Return a copy of the "var_obs_dict" list to user if requested."""
+        """Return a copy of the "var_obs_dict" list to the user if requested."""
         #Note that a copy is needed in order to avoid having a script mistakenly
-        #modify this variable:
+        #modify this variable, as it is mutable and thus passed by reference:
         return copy.copy(self.__var_obs_dict)
 
 #++++++++++++++++++++

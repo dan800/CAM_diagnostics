@@ -16,8 +16,9 @@ import os
 import os.path
 import glob
 import subprocess
+import multiprocessing as mp
+
 import importlib
-import copy
 
 from pathlib import Path
 from typing import Optional
@@ -91,7 +92,9 @@ for root, dirs, files in os.walk(_DIAG_SCRIPTS_PATH):
 #+++++++++++++++++++++++++++++
 
 #Finally, import needed ADF module:
-from adf_obs import AdfObs
+from adf_web import AdfWeb
+
+
 
 #################
 #Helper functions
@@ -129,7 +132,7 @@ def construct_index_info(page_dict, fnam, opf):
 #Main ADF diagnostics class (AdfDiag)
 ######################################
 
-class AdfDiag(AdfObs):
+class AdfDiag(AdfWeb):
 
     """
     Main ADF diagnostics object.
@@ -158,65 +161,12 @@ class AdfDiag(AdfObs):
         #Initialize Config/Base attributes:
         super().__init__(config_file, debug=debug)
 
-        #Add basic diagnostic info to object:
-        self.__basic_info = self.read_config_var('diag_basic_info', required=True)
+        #Add CVDP info to object:
+        self.__cvdp_info = self.read_config_var('diag_cvdp_info')
 
-        #Expand basic info variable strings:
-        self.expand_references(self.__basic_info)
-
-        #Add CAM climatology info to object:
-        self.__cam_climo_info = self.read_config_var('diag_cam_climo', required=True)
-
-        #Expand CAM climo info variable strings:
-        self.expand_references(self.__cam_climo_info)
-
-        #Check if inputs are of the correct type.
-        #Ideally this sort of checking should be done
-        #in its own class that AdfDiag inherits from:
-        #-------------------------------------------
-
-        #Use "cam_case_name" as the variable that sets the total number of cases:
-        if isinstance(self.get_cam_info("cam_case_name", required=True), list):
-
-            #Extract total number of test cases:
-            num_cases = len(self.get_cam_info("cam_case_name"))
-
-        else:
-            #Set number of cases to one:
-            num_cases = 1
-        #End if
-
-
-        #Loop over all items in config dict:
-        for conf_var, conf_val in self.__cam_climo_info.items():
-            if isinstance(conf_val, list):
-                #If a list, then make sure it is has the correct number of entries:
-                if not len(conf_val) == num_cases:
-                    emsg = f"diag_cam_climo config variable '{conf_var}' should have"
-                    emsg += f" {num_cases} entries, instead it has {len(conf_val)}"
-                    self.end_diag_fail(emsg)
-            else:
-                #If not a list, then convert it to one:
-                self.__cam_climo_info[conf_var] = [conf_val]
-            #End if
-        #End for
-
-        #-------------------------------------------
-
-        #Check if a CAM vs AMWG obs comparison is being performed:
-        if self.compare_obs:
-
-            #Finally, set the baseline info to None, to ensure any scripts
-            #that check this variable won't crash:
-            self.__cam_bl_climo_info = None
-
-        else:
-            #If not, then assume a CAM vs CAM run and add CAM baseline climatology info to object:
-            self.__cam_bl_climo_info = self.read_config_var('diag_cam_baseline_climo',
-                                                            required=True)
-
-            #Expand CAM baseline climo info variable strings:
-            self.expand_references(self.__cam_bl_climo_info)
+        #Expand CVDP climo info variable strings:
+        if self.__cvdp_info is not None:
+            self.expand_references(self.__cvdp_info)
         #End if
 
         #Add averaging script names:
@@ -231,82 +181,20 @@ class AdfDiag(AdfObs):
         #Add plotting script names:
         self.__plotting_scripts = self.read_config_var('plotting_scripts')
 
-        #Create plot location variable for potential use by the website generator.
-        #Please note that this variable is only set if "create_plots" or "peform_analyses"
-        #is called:
-        self.__plot_location = [] #Must be a list to manage multiple cases
-
-    #####
-
-    # Create property needed to return "create_html" logical to user:
-    @property
-    def create_html(self):
-        """Return the "create_html" logical to user if requested."""
-        return self.get_basic_info('create_html')
-
-    # Create property needed to return "plot_location" variable to user:
-    @property
-    def plot_location(self):
-        """Return a copy of the '__plot_location' string list to user if requested."""
-        #Note that a copy is needed in order to avoid having a script mistakenly
-        #modify this variable:
-        return copy.copy(self.__plot_location)
-
     #########
     #Variable extraction functions
     #########
 
-    def get_basic_info(self, var_str, required=False):
+    def get_cvdp_info(self, var_str, required=False):
         """
-        Return the config variable from 'diag_basic_info' as requested by
-        the user.  This function assumes that if the user is requesting it,
-        then it must be required.
-        """
-
-        return self.read_config_var(var_str,
-                                    conf_dict=self.__basic_info,
-                                    required=required)
-
-    #########
-
-    def get_cam_info(self, var_str, required=False):
-        """
-        Return the config variable from 'diag_cam_climo' as requested by
-        the user.  This function assumes that if the user is requesting it,
-        then it must be required.
+        Return the config variable from 'diag_cvdp_info' as requested by
+        the user. If 'diag_cvdp_info' is not found then try grabbing the
+        variable from the top level of the YAML config file dictionary
+        instead.
         """
 
         return self.read_config_var(var_str,
-                                    conf_dict=self.__cam_climo_info,
-                                    required=required)
-
-    #########
-
-    def get_baseline_info(self, var_str, required=False):
-        """
-        Return the config variable from 'diag_cam_baseline_climo' as requested by
-        the user.  This function assumes that if the user is requesting it,
-        then it must be required.
-        """
-
-        #Check if the cam baseline dictionary exists:
-        if not self.__cam_bl_climo_info:
-            #If required, then throw an error:
-            if required:
-                emsg = "get_baseline_info: Requested variable cannot be found"
-                emsg += " because no baseline info exists.\n"
-                emsg += "This is likely because an observational comparison is being done,"
-                emsg += " so try adding 'required = False' to the get call."
-                self.end_diag_fail(emsg)
-            #End if
-
-            #If not required, then return none:
-            return None
-        #End if
-
-        #If basline dictionary exists, then search for variable like normal:
-        return self.read_config_var(var_str,
-                                    conf_dict=self.__cam_bl_climo_info,
+                                    conf_dict=self.__cvdp_info,
                                     required=required)
 
     #########
@@ -425,12 +313,12 @@ class AdfDiag(AdfObs):
             emsg = f"Function '{func_name}' cannot be found in module '{module_name}.py'."
             self.end_diag_fail(emsg)
 
-        #Run function and return result:
+        #If kwargs are present, then run function with kwargs and return result:
         if func_kwargs:
             return func(self, **func_kwargs)
-        else:
-            return func(self)
-        #End if
+
+        #Otherwise just run function as-is, and return result:
+        return func(self)
 
     #########
 
@@ -440,18 +328,29 @@ class AdfDiag(AdfObs):
         Generate time series versions of the CAM history file data.
         """
 
+        global call_ncrcat
+        def call_ncrcat(cmd):
+            '''this is an internal function to `create_time_series`
+            It just wraps the subprocess.call() function, so it can be
+            used with the multiprocessing Pool that is constructed below.
+            It is declared as global to avoid AttributeError.
+            '''
+            return subprocess.run(cmd, shell=False)
+
+
         #Check if baseline time-series files are being created:
         if baseline:
             #Then use the CAM baseline climo dictionary
             #and case name:
-            cam_climo_dict = self.__cam_bl_climo_info
+            cam_climo_dict = self.baseline_climo_dict
         else:
             #If not, then just extract the standard CAM climo dictionary
             #and case name::
-            cam_climo_dict = self.__cam_climo_info
+            cam_climo_dict = self.cam_climo_dict
+        #End if
 
         #Notify user that script has started:
-        print("  Generating CAM time series files...")
+        print("\n  Generating CAM time series files...")
 
         #Extract case name(s):
         case_names = self.read_config_var('cam_case_name',
@@ -508,6 +407,7 @@ class AdfDiag(AdfObs):
                 emsg += f" for case '{case_name}'.  Will rely on those files directly."
                 print(emsg)
                 continue
+            #End if
 
             print(f"\t Processing time series for case '{case_name}' :")
 
@@ -552,16 +452,25 @@ class AdfDiag(AdfObs):
                 self.end_diag_fail(emsg)
             #End if
 
+            #Read history file number from the yaml file
+            hist_num = self.get_basic_info('hist_num')
+
+            #If hist_num is not present, then default to 'h0':
+            if not hist_num:
+                hist_num = 'h0'
+            #End if
+
             #Check if history files actually exist. If not then kill script:
-            if not list(starting_location.glob('*.cam.h0.*.nc')):
-                emsg = f"No CAM history (h0) files found in '{starting_location}'."
+            hist_str = '*.cam.'+hist_num
+            if not list(starting_location.glob(hist_str+'.*.nc')):
+                emsg = f"No CAM history {hist_str} files found in '{starting_location}'."
                 emsg += " Script is ending here."
                 self.end_diag_fail(emsg)
             #End if
 
             # NOTE: We need to have the half-empty cases covered, too. (*, end) & (start, *)
             if start_year == end_year == "*":
-                files_list = sorted(list(starting_location.glob('*.cam.h0.*.nc')))
+                files_list = sorted(starting_location.glob(hist_str+'.*.nc'))
             else:
                 #Create empty list:
                 files_list = []
@@ -576,25 +485,111 @@ class AdfDiag(AdfObs):
                 #Loop over start and end years:
                 for year in range(start_year, end_year+1):
                     #Add files to main file list:
-                    for fname in starting_location.glob(f'*.cam.h0.*{year}-*.nc'):
+                    for fname in starting_location.glob(f'{hist_str}.*{year}-*.nc'):
                         files_list.append(fname)
                     #End for
                 #End for
             #End if
 
+
             #Create ordered list of CAM history files:
             hist_files = sorted(files_list)
+
+            #Open an xarray dataset from the first model history file:
+            hist_file_ds = xr.open_dataset(hist_files[0], decode_cf=False, decode_times=False)
+
+            #Get a list of data variables in the 1st hist file:
+            hist_file_var_list = list(hist_file_ds.data_vars)
+            #Note: could use `open_mfdataset`, but that can become very slow;
+            #      This approach effectively assumes that all files contain the same variables.
+
+            #Check what kind of vertical coordinate (if any) is being used for this model run:
+            #------------------------
+            if 'lev' in hist_file_ds:
+                #Extract vertical level attributes:
+                lev_attrs = hist_file_ds['lev'].attrs
+
+                #First check if there is a "vert_coord" attribute:
+                if 'vert_coord' in lev_attrs:
+                    vert_coord_type = lev_attrs['vert_coord']
+                else:
+                    #Next check that the "long_name" attribute exists:
+                    if 'long_name' in lev_attrs:
+                        #Extract long name:
+                        lev_long_name = lev_attrs['long_name']
+
+                        #Check for "keywords" in the long name:
+                        if 'hybrid level' in lev_long_name:
+                            #Set model to hybrid vertical levels:
+                            vert_coord_type = "hybrid"
+                        elif 'zeta level' in lev_long_name:
+                            #Set model to height (z) vertical levels:
+                            vert_coord_type = "height"
+                        else:
+                            #Print a warning, and assume that no vertical
+                            #level information is needed.
+                            wmsg = "WARNING! Unable to determine the vertical coordinate"
+                            wmsg +=f" type from the 'lev' long name, which is:\n'{lev_long_name}'."
+                            wmsg += "\nNo additional vertical coordinate information will be"
+                            wmsg += " transferred beyond the 'lev' dimension itself."
+                            print(wmsg)
+
+                            vert_coord_type = None
+                        #End if
+                    else:
+                        #Print a warning, and assume hybrid levels (for now):
+                        wmsg = "WARNING!  No long name found for the 'lev' dimension,"
+                        wmsg += " so no additional vertical coordinate information will be"
+                        wmsg += " transferred beyond the 'lev' dimension itself."
+                        print(wmsg)
+
+                        vert_coord_type = None
+                    #End if (long name)
+                #End if (vert_coord)
+            else:
+                #No level dimension found, so assume there is no vertical coordinate:
+                vert_coord_type = None
+            #End if (lev existence)
+            #------------------------
 
             #Check if time series directory exists, and if not, then create it:
             #Use pathlib to create parent directories, if necessary.
             Path(ts_dir[case_idx]).mkdir(parents=True, exist_ok=True)
 
-            #Loop over CAM history variables:
-            for var in self.diag_var_list:
+            #INPUT NAME TEMPLATE: $CASE.$scomp.[$type.][$string.]$date[$ending]
+            first_file_split = str(hist_files[0]).split(".")
+            if first_file_split[-1] == "nc":
+                time_string_start = first_file_split[-2].replace("-","")
+            else:
+                time_string_start = first_file_split[-1].replace("-","")
+            last_file_split = str(hist_files[-1]).split(".")
+            if last_file_split[-1] == "nc":
+                time_string_finish = last_file_split[-2].replace("-","")
+            else:
+                time_string_finish = last_file_split[-1].replace("-","")
+            time_string = "-".join([time_string_start, time_string_finish])
 
-                #Create full path name:
-                ts_outfil_str = ts_dir[case_idx] + os.sep + case_name + \
-                              ".ncrcat."+var+".nc"
+            #Loop over CAM history variables:
+            list_of_commands = []
+            for var in self.diag_var_list:
+                if var not in hist_file_var_list:
+                    msg = f"WARNING: {var} is not in the file {hist_files[0]}."
+                    msg += " No time series will be generated."
+                    print(msg)
+                    continue
+
+                #Check if variable has a "lev" dimension according to first file:
+                if 'lev' in hist_file_ds[var].dims:
+                    has_lev = True
+                else:
+                    has_lev = False
+                #End if
+
+                #Create full path name,  file name template:
+                #$cam_case_name.h0.$variable.YYYYMM-YYYYMM.nc
+
+                ts_outfil_str = ts_dir[case_idx] + os.sep + \
+                ".".join([case_name, hist_num, var, time_string, "nc" ])
 
                 #Check if files already exist in time series directory:
                 ts_file_list = glob.glob(ts_outfil_str)
@@ -606,14 +601,40 @@ class AdfDiag(AdfObs):
                         continue
 
                 #Notify user of new time series file:
-                print("\t - time series for {}".format(var))
+                print(f"\t - time series for {var}")
 
-                #Run "ncrcat" command to generate time series file:
-                cmd = ["ncrcat", "-O", "-4", "-h", "-v", f"{var},hyam,hybm,hyai,hybi,PS"] + \
-                       hist_files + ["-o", ts_outfil_str]
-                subprocess.run(cmd, check=True)
+                #Determine "ncrcat" command to generate time series file:
+                if has_lev and vert_coord_type:
+                    if vert_coord_type == "hybrid":
+                        cmd = ["ncrcat", "-O", "-4", "-h", "-v",
+                               f"{var},hyam,hybm,hyai,hybi,PS"] + \
+                               hist_files + ["-o", ts_outfil_str]
+                    elif vert_coord_type == "height":
+                        #Adding PMID here works, but significantly increases
+                        #the storage (disk usage) requirements of the ADF.
+                        #This can be alleviated in the future by figuring out
+                        #a way to determine all of the regridding targets at
+                        #the start of the ADF run, and then regridding a single
+                        #PMID file to each one of those targets separately. -JN
+                        cmd = ["ncrcat", "-O", "-4", "-h", "-v", f"{var},PMID,PS"] + \
+                                hist_files + ["-o", ts_outfil_str]
+                    #End if
+                else:
+                    #No vertical coordinate (or no coordinate meta-data),
+                    #so no additional variables needed:
+                    cmd = ["ncrcat", "-O", "-4", "-h", "-v", f"{var}"] + \
+                           hist_files + ["-o", ts_outfil_str]
+                #End if
+
+                #Add to command list for use in multi-processing pool:
+                list_of_commands.append(cmd)
 
             #End variable loop
+
+            #Now run the "ncrcat" subprocesses in parallel:
+            with mp.Pool(processes=self.num_procs) as p:
+                result = p.map(call_ncrcat, list_of_commands)
+            #End with
 
         #End cases loop
 
@@ -662,7 +683,7 @@ class AdfDiag(AdfObs):
 
         else:
             #If not, then notify user that climo file generation is skipped.
-            print("  No climatology files were requested by user, so averaging will be skipped.")
+            print("\n  No climatology files were requested by user, so averaging will be skipped.")
 
     #########
 
@@ -688,8 +709,8 @@ class AdfDiag(AdfObs):
                                                       # script names as keys that hold
                                                       # kwargs(dict) and module(str)
 
-        if not regrid_func_names or all([func_names is None for func_names in regrid_func_names]):
-            print("No regridding options provided, continue.")
+        if not regrid_func_names or all(func_names is None for func_names in regrid_func_names):
+            print("\n  No regridding options provided, continue.")
             return
             # NOTE: if no regridding options provided, we should skip it, but
             #       do we need to still copy (symlink?) files into the regrid directory?
@@ -719,41 +740,26 @@ class AdfDiag(AdfObs):
 
         #If no scripts are listed, then exit routine:
         if not anly_func_names:
-            print("Nothing listed under 'analysis_scripts', exiting 'perform_analyses' method.")
+            print("\n  Nothing listed under 'analysis_scripts', exiting 'perform_analyses' method.")
             return
+        #End if
 
         #Set "data_name" variable, which depends on "compare_obs":
         if self.compare_obs:
             data_name = "obs"
         else:
+            #Set data_name to basline case:
             data_name = self.get_baseline_info('cam_case_name', required=True)
 
-        #Set "plot_location" variable, if it doesn't exist already, and save value in diag object.
-        #Please note that this is also assumed to be the output location for the analyses scripts:
-        if not self.__plot_location:
+            #Attempt to grab baseline start_years (not currently required):
+            syear_baseline = self.get_baseline_info('start_year')
+            eyear_baseline = self.get_baseline_info('end_year')
 
-            #Plot directory:
-            plot_dir = self.get_basic_info('cam_diag_plot_loc', required=True)
-
-            #Case names:
-            case_names = self.get_cam_info('cam_case_name', required=True)
-
-            #Start years (not currently required):
-            syears = self.get_cam_info('start_year')
-
-            #End year (not currently rquired):
-            eyears = self.get_cam_info('end_year')
-
-            #Loop over cases:
-            for case_idx, case_name in enumerate(case_names):
-
-                #Check if case has start and end years:
-                if syears[case_idx] and eyears[case_idx]:
-                    direc_name = f"{case_name}_vs_{data_name}_{syears[case_idx]}_{eyears[case_idx]}"
-                    self.__plot_location.append(os.path.join(plot_dir, direc_name))
-                else:
-                    direc_name = f"{case_name}_vs_{data_name}"
-                    self.__plot_location.append(os.path.join(plot_dir, direc_name))
+            #If years exist, then add them to the data_name string:
+            if syear_baseline and eyear_baseline:
+                data_name += f"_{syear_baseline}_{eyear_baseline}"
+            #End if
+        #End if
 
         #Run the listed scripts:
         self.__diag_scripts_caller("analysis", anly_func_names,
@@ -784,40 +790,26 @@ class AdfDiag(AdfObs):
 
         #If no scripts are listed, then exit routine:
         if not plot_func_names:
-            print("Nothing listed under 'plotting_scripts', so no plots will be made.")
+            print("\n  Nothing listed under 'plotting_scripts', so no plots will be made.")
             return
+        #End if
 
         #Set "data_name" variable, which depends on "compare_obs":
         if self.compare_obs:
             data_name = "obs"
         else:
+            #Set data_name to basline case:
             data_name = self.get_baseline_info('cam_case_name', required=True)
 
-        #Set "plot_location" variable, if it doesn't exist already, and save value in diag object:
-        if not self.__plot_location:
+            #Attempt to grab baseline start_years (not currently required):
+            syear_baseline = self.get_baseline_info('start_year')
+            eyear_baseline = self.get_baseline_info('end_year')
 
-            #Plot directory:
-            plot_dir = self.get_basic_info('cam_diag_plot_loc', required=True)
-
-            #Case names:
-            case_names = self.get_cam_info('cam_case_name', required=True)
-
-            #Start years (not currently required):
-            syears = self.get_cam_info('start_year')
-
-            #End year (not currently rquired):
-            eyears = self.get_cam_info('end_year')
-
-            #Loop over cases:
-            for case_idx, case_name in enumerate(case_names):
-
-                #Check if case has start and end years:
-                if syears[case_idx] and eyears[case_idx]:
-                    direc_name = f"{case_name}_vs_{data_name}_{syears[case_idx]}_{eyears[case_idx]}"
-                    self.__plot_location.append(os.path.join(plot_dir, direc_name))
-                else:
-                    direc_name = f"{case_name}_vs_{data_name}"
-                    self.__plot_location.append(os.path.join(plot_dir, direc_name))
+            #If years exist, then add them to the data_name string:
+            if syear_baseline and eyear_baseline:
+                data_name += f"_{syear_baseline}_{eyear_baseline}"
+            #End if
+        #End if
 
         #Run the listed scripts:
         self.__diag_scripts_caller("plotting", plot_func_names,
@@ -825,282 +817,122 @@ class AdfDiag(AdfObs):
 
     #########
 
-    def create_website(self):
+    def setup_run_cvdp(self):
 
         """
-        Generate webpages to display diagnostic results.
+        Create CVDP directory tree, generate namelist file and
+        edit driver.ncl needed to run CVDP. Submit CVDP diagnostics.
+
         """
 
         #import needed standard modules:
         import shutil
-        from collections import OrderedDict
 
-        #Import "special" modules:
-        try:
-            import jinja2
-        except ImportError:
-            print("Jinja2 module does not exist in python path, but is needed for website.")
-            print("Please install module, e.g. 'pip install Jinja2'.")
-            sys.exit(1)
-        #End except
+        #Case names:
+        case_names = self.get_cam_info('cam_case_name', required=True)
 
-        #Notify user that script has started:
-        print("  Generating Diagnostics webpages...")
+        #Start years (not currently required):
+        syears = self.get_cam_info('start_year')
 
-        #Check where the relevant plots are located:
-        if self.__plot_location:
-            plot_location = self.__plot_location
+        #End year (not currently rquired):
+        eyears = self.get_cam_info('end_year')
+
+        #Timeseries locations:
+        cam_ts_loc = self.get_cam_info('cam_ts_loc')
+
+        #set CVDP directory, recursively copy cvdp codebase to the CVDP directory
+        if len(case_names) > 1:
+            cvdp_dir = self.get_cvdp_info('cvdp_loc', required=True)+case_names[0]+'_multi_case'
         else:
-            plot_location.append(self.get_basic_info('cam_diag_plot_loc', required=True))
+            cvdp_dir = self.get_cvdp_info('cvdp_loc', required=True)+case_names[0]
+        #end if
+        if not os.path.isdir(cvdp_dir):
+            shutil.copytree(self.get_cvdp_info('cvdp_codebase_loc', required=True),cvdp_dir)
         #End if
 
-        #If there is more than one plot location, then create new website directory:
-        if len(plot_location) > 1:
-            main_site_path = Path(self.get_basic_info('cam_diag_plot_loc', required=True))
-            main_site_path = main_site_path / "main_website"
-            main_site_path.mkdir(exist_ok=True)
-            case_sites = OrderedDict()
-        else:
-            main_site_path = "" #Set main_site_path to blank value
+        #check to see if there is a CAM baseline case. If there is, read in relevant information.
+        if not self.get_basic_info('compare_obs'):
+            case_name_baseline = self.get_baseline_info('cam_case_name')
+            syears_baseline = self.get_baseline_info('start_year')
+            eyears_baseline = self.get_baseline_info('end_year')
+            baseline_ts_loc = self.get_baseline_info('cam_ts_loc')
         #End if
 
-        #Extract needed variables from yaml file:
-        case_names = self.read_config_var('cam_case_name',
-                                         conf_dict=self.__cam_climo_info,
-                                         required=True)
-
-        #Extract variable list:
-        var_list = self.diag_var_list
-
-        #Set name of comparison data, which depends on "compare_obs":
-        if self.compare_obs:
-            data_name = "obs"
-        else:
-            data_name = self.read_config_var('cam_case_name',
-                                             conf_dict=self.__cam_bl_climo_info,
-                                             required=True)
-        #End if
-
-        #Set preferred order of seasons:
-        season_order = ["ANN", "DJF", "MAM", "JJA", "SON"]
-
-        #Set preferred order of plot types:
-        plot_type_order = ["LatLon", "Zonal", "NHPolar", "SHPolar"]
-
-        #Set path to Jinja2 template files:
-        jinja_template_dir = Path(_LOCAL_PATH, 'website_templates')
-
-        #Create the jinja Environment object:
-        jinenv = jinja2.Environment(loader=jinja2.FileSystemLoader(jinja_template_dir))
-
-        #Create alphabetically-sorted variable list:
-        var_list_alpha = sorted(var_list)
-
-        #Loop over model cases:
+        #Loop over cases to create individual text array to be written to namelist file.
+        row_list = []
         for case_idx, case_name in enumerate(case_names):
+            row = [case_name,' | ',str(cam_ts_loc[case_idx]),os.sep,' | ',
+                   str(syears[case_idx]),' | ',str(eyears[case_idx])]
+            row_list.append("".join(row))
+        #End for
 
-            #Create new path object from user-specified plot directory path:
-            plot_path = Path(plot_location[case_idx])
-
-            #Create the directory where the website will be built:
-            website_dir = plot_path / "website"
-            website_dir.mkdir(exist_ok=True)
-
-            #Create a directory that will hold just the html files for individual images:
-            img_pages_dir = website_dir / "html_img"
-            img_pages_dir.mkdir(exist_ok=True)
-
-            #Create a directory that will hold copies of the actual images:
-            assets_dir = website_dir / "assets"
-            assets_dir.mkdir(exist_ok=True)
-
-            #Specify where CSS files will be stored:
-            css_files_dir = website_dir / "templates"
-            css_files_dir.mkdir(exist_ok=True)
-
-            #Copy CSS files over to output directory:
-            for css_file in jinja_template_dir.glob('*.css'):
-                shutil.copyfile(css_file, css_files_dir / css_file.name)
-
-            #Copy images into the website image dictionary:
-            for img in plot_path.glob("*.png"):
-                idest = assets_dir / img.name
-                shutil.copyfile(img, idest) # store image in assets
-
-
-            mean_html_info = OrderedDict()  # this is going to hold the data for building the mean
-                                            # plots provisional structure:
-                                            # key = variable_name
-                                            # values -> dict w/ keys being "TYPE" of plots
-                                            # w/ values being dict w/ keys being TEMPORAL sampling,
-                                            # values being the URL
-
-            #Loop over variables:
-            for var in var_list_alpha:
-                #Loop over plot type:
-                for ptype in plot_type_order:
-                    #Loop over seasons:
-                    for season in season_order:
-                        #Create the data that will be fed into the template:
-                        for img in assets_dir.glob(f"{var}_{season}_{ptype}_*.png"):
-                            alt_text  = img.stem #Extract image file name text
-
-                            #Create output file (don't worry about analysis type for now):
-                            outputfile = img_pages_dir / f'plot_page_{var}_{season}_{ptype}.html'
-                            # Hacky - how to get the relative path in a better way?:
-                            img_data = [os.pardir+os.sep+assets_dir.name+os.sep+img.name, alt_text]
-                            title = f"Variable: {var}"              #Create title
-                            tmpl = jinenv.get_template('template.html')  #Set template
-                            rndr = tmpl.render(title=title, value=img_data, case1=case_name,
-                                               case2=data_name) #The template rendered
-
-                            #Open HTML file:
-                            with open(outputfile,'w') as ofil:
-                                ofil.write(rndr)
-                            #End with
-
-                            #Initialize Ordered Dictionary for variable:
-                            if var not in mean_html_info:
-                                mean_html_info[var] = OrderedDict()
-
-                            #Initialize Ordered Dictionary for plot type:
-                            if ptype not in mean_html_info[var]:
-                                mean_html_info[var][ptype] = OrderedDict()
-
-                            mean_html_info[var][ptype][season] = outputfile.name
-                        #End for (assests loop)
-                    #End for (seasons loop)
-                #End for (plot type loop)
-            #End for (variable loop)
-
-            #Construct mean_diag.html
-            mean_title = "AMP Diagnostic Plots"
-            mean_tmpl = jinenv.get_template('template_mean_diag.html')
-            mean_rndr = mean_tmpl.render(title=mean_title,
-                            case1=case_name,
-                            case2=data_name,
-                            mydata=mean_html_info)
-
-            #Write mean diagnostic plots HTML file:
-            outputfile = img_pages_dir / "mean_diag.html"
-            with open(outputfile,'w') as ofil:
-                ofil.write(mean_rndr)
-            #End with
-
-            #Grab AMWG Table HTML files:
-            table_html_files = list(plot_path.glob(f"amwg_table_{case_name}*.html"))
-
-            #Also grab baseline/obs tables, which are always stored in the first case directory:
-            if case_idx == 0:
-                data_table_html_files = list(plot_path.glob(f"amwg_table_{data_name}*.html"))
-
-            #Determine if any AMWG tables were generated:
-            if table_html_files:
-
-                #Set Table HTML generation logical to "TRUE":
-                gen_table_html = True
-
-                #Create a directory that will hold table html files:
-                table_pages_dir = website_dir / "html_table"
-                table_pages_dir.mkdir(exist_ok=True)
-
-                #Move all case table html files to new directory:
-                for table_html in table_html_files:
-                    shutil.move(table_html, table_pages_dir / table_html.name)
-
-                #copy all data table html files as well:
-                for data_table_html in data_table_html_files:
-                    shutil.copy2(data_table_html, table_pages_dir / data_table_html.name)
-
-                #Construct dictionary needed for HTML page:
-                amwg_tables = OrderedDict()
-
-                for case in [case_name, data_name]:
-
-                    #Search for case name in moved HTML files:
-                    table_htmls = table_pages_dir.glob(f"amwg_table_{case}.html")
-
-                    #Check if file exists:
-                    if table_htmls:
-
-                        #Initialize loop counter:
-                        count = 0
-
-                        #Loop over globbed files:
-                        for table_html in table_htmls:
-
-                            #Create relative path for HTML file:
-                            amwg_tables[case] = table_html.name
-
-                            #Update counter:
-                            count += 1
-
-                            #If counter greater than one, then throw an error:
-                            if count > 1:
-                                emsg = f"More than one AMWG table is associated with case '{case}'."
-                                emsg += "\nNot sure what is going on, "
-                                emsg += "so website generation will end here."
-                                self.end_diag_fail(emsg)
-                            #End if
-                        #End for (table html file loop)
-                    #End if (table html file exists check)
-                #End for (case vs data)
-
-                #Construct mean_table.html
-                mean_title = "AMP Diagnostic Tables:"
-                mean_tmpl = jinenv.get_template('template_mean_table.html')
-                mean_rndr = mean_tmpl.render(title=mean_title,
-                                amwg_tables=amwg_tables)
-
-                #Write mean diagnostic tables HTML file:
-                outputfile = table_pages_dir / "mean_table.html"
-                with open(outputfile,'w') as ofil:
-                    ofil.write(mean_rndr)
-                #End with
-
-            else:
-                #No Tables exist, so no link will be added to main page:
-                gen_table_html = False
+        #Create new namelist file. If CAM baseline case present add it to list,
+        #namelist file must end in a blank line.
+        with open(os.path.join(cvdp_dir, "namelist"), 'w', encoding='utf-8') as fnml:
+            for rowtext in row_list:
+                fnml.write(rowtext)
+            #End for
+            fnml.write('\n\n')
+            if "baseline_ts_loc" in locals():
+                rowb = [case_name_baseline,' | ',str(baseline_ts_loc),os.sep,' | ',
+                        str(syears_baseline),' | ',str(eyears_baseline)]
+                rowtextb = "".join(rowb)
+                fnml.write(rowtextb)
+                fnml.write('\n\n')
             #End if
+        #End with
 
-            #Construct index.html
-            index_title = "AMP Diagnostics Prototype"
-            index_tmpl = jinenv.get_template('template_index.html')
-            index_rndr = index_tmpl.render(title=index_title,
-                             case1=case_name,
-                             case2=data_name,
-                             gen_table_html=gen_table_html)
+        #modify driver.ncl to set the proper output directory, webpage title, and location
+        #of CVDP NCL scripts, set modular = True (to run multiple CVDP scripts at once),
+        #and modify the modular_list to exclude all scripts focused solely on non-atmospheric
+        #variables, and set tar_output to True if cvdp_tar: true
+        with open(os.path.join(cvdp_dir, "driver.ncl"), 'r', encoding='utf-8') as f_in, \
+             open(os.path.join(cvdp_dir, f"driver.{case_names[0]}.ncl"), 'w', \
+                               encoding='utf-8') as f_out:
+            for line in f_in:
+                if '  outdir  ' in line:
+                    line = '  outdir = "'+cvdp_dir+'/output/"'
+                if '  webpage_title  ' in line:
+                    line = '  webpage_title = "ADF/CVDP Comparison"'
+                if 'directory path of CVDP NCL scripts' in line:
+                    line = '  zp = "'+cvdp_dir+'/ncl_scripts/"'
+                if '  modular = ' in line:
+                    line = '  modular = "True"'
+                if '  modular_list = ' in line:
+                    line = '  modular_list = "'
+                    line += 'psl.nam_nao,psl.pna_npo,tas.trends_timeseries,snd.trends,'
+                    line += 'psl.trends,amo,pdo,sst.indices,pr.trends_timeseries,'
+                    line += 'psl.sam_psa,sst.mean_stddev,'
+                    line += 'psl.mean_stddev,pr.mean_stddev,sst.trends_timeseries,'
+                    line += 'tas.mean_stddev,ipo"'
+                if self.get_cvdp_info('cvdp_tar'):
+                    if '  tar_output  ' in line:
+                        line = '  tar_output = "True"'
+                    #End if
+                #End if
+                f_out.write(line)
+            #End for
+        #End with
 
-            #Write Mean diagnostics HTML file:
-            outputfile = website_dir / "index.html"
-            with open(outputfile,'w') as ofil:
-                ofil.write(index_rndr)
-            #End with
+        #Submit the CVDP driver script in background mode, send output to cvdp.out file
+        with open(os.path.join(cvdp_dir,'cvdp.out'), 'w', encoding='utf-8') as subout:
+            _ = subprocess.Popen([f'cd {cvdp_dir}; ncl -Q '+ \
+                                  os.path.join(cvdp_dir,f'driver.{case_names[0]}.ncl')],
+                                  shell=True, stdout=subout, close_fds=True)
+        #End with
 
-            #If this is a multi-case instance, then copy website to "main" directory:
-            if main_site_path:
-                shutil.copytree(website_dir, main_site_path / case_name)
-                #Also add path to case_sites dictionary:
-                case_sites[case_name] = os.path.join(os.curdir, case_name, "index.html")
-                #Finally, if first case, then also copy templates directory for CSS files:
-                if case_idx == 0:
-                    shutil.copytree(css_files_dir, main_site_path / "templates")
-
-        #End for (model case loop)
-
-        #Create multi-case site, if needed:
-        if main_site_path:
-            main_title = "ADF Diagnostics"
-            main_tmpl = jinenv.get_template('template_multi_case_index.html')
-            main_rndr = main_tmpl.render(title=main_title,
-                            case_sites=case_sites)
-            #Write multi-case main HTML file:
-            outputfile = main_site_path / "index.html"
-            with open(outputfile,'w') as ofil:
-                ofil.write(main_rndr)
-            #End with
-
-        #Notify user that script has finishedd:
-        print("  ...Webpages have been generated successfully.")
+        print('   ')
+        print('CVDP is running in background. ADF continuing.')
+        print(f'CVDP terminal output is located in {cvdp_dir}/cvdp.out')
+        if self.get_cvdp_info('cvdp_tar'):
+            print('CVDP graphical and netCDF file output can be found here:' + \
+                  f' {cvdp_dir}/output/cvdp.tar')
+            print('Open index.html (within cvdp.tar file) in web browser to view CVDP results.')
+        else:
+            print(f'CVDP graphical and netCDF file output can be found here: {cvdp_dir}/output/')
+            print(f'Open {cvdp_dir}/output/index.html file in web browser to view CVDP results.')
+        #End if
+        print('For CVDP information visit: https://www.cesm.ucar.edu/working_groups/CVC/cvdp/')
+        print('   ')
 
 ###############
